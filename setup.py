@@ -5,7 +5,6 @@
 # Minimal Python version sanity check (from IPython/Jupyterhub)
 #-----------------------------------------------------------------------------
 from distutils.core import setup
-from __future__ import print_function
 
 import os
 import sys
@@ -29,7 +28,7 @@ here = os.path.abspath(os.path.dirname(__file__))
 
 # Get the current package version.
 version_ns = {}
-with open(pjoin(here, 'oauthenticator', '__version.__py')) as f:
+with open(pjoin(here, 'kcauthenticator', '__version__.py')) as f:
     exec(f.read(), {}, version_ns)
 
 
