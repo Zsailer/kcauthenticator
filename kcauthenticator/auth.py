@@ -15,7 +15,8 @@ from oauthenticator.generic import GenericEnvMixin, GenericLoginHandler, Generic
 
 from traitlets import (
     Unicode,
-    Bool
+    Bool,
+    default
 )
 
 KEYCLOAK_HOST = "localhost"
@@ -26,15 +27,15 @@ REALM = "master"
 def keycloak_url_from_endpoint(endpoint):
     return f"http://{KEYCLOAK_HOST}:{PORT}/auth/realms/{REALM}/protocol/openid-connect/{endpoint}"
 
-
-def admin_url_from_endpoint(endpoint, *args):
-    return f"http://{KEYCLOAK_HOST}:{PORT}/admin/realms/{REALM}/"
-
-
 class KeycloakEnvMixin(GenericEnvMixin):
-    _OAUTH_ACCESS_TOKEN_URL = keycloak_url_from_endpoint("token")
-    _OAUTH_AUTHORIZE_URL = keycloak_url_from_endpoint("auth")
 
+    @property
+    def _OAUTH_ACCESS_TOKEN_URL(self):
+        return self.authenticator.token_url
+
+    @property
+    def _OAUTH_AUTHORIZE_URL(self):
+        return self.authenticator.auth_url
 
 class KeycloakLoginHandler(GenericLoginHandler, KeycloakEnvMixin):
     pass
@@ -60,24 +61,87 @@ class KeycloakAuthenticator(GenericOAuthenticator):
 
     """
     login_service = "Keycloak"
-    realm = Unicode("master")
+
+    realm = Unicode(
+        "master",
+        help="The Keycloak realm to use for authenticating Jupyterhub."
+    ).tag(config=True)
+
+    hostname = Unicode(
+        "localhost:8080",
+        help="Host address.",
+    ).tag(config=True)
+
     login_handler = KeycloakLoginHandler
-    token_url = keycloak_url_from_endpoint("token")
-    introspect_url = keycloak_url_from_endpoint("introspect")
-    userdata_url = keycloak_url_from_endpoint("userinfo")
-    username_key = "preferred_username"
+    
+    def _url_from_endpoint(self, endpoint):
+        """Build a url to keycloak server."""
+        return "http://{host}/auth/realms/{realm}/protocol/openid-connect/{endpoint}".format(
+            host=self.host,
+            realm=self.realm,
+            endpoint=self.endpoint
+        )
+
+    token_endpoint = Unicode(
+        os.environ.get('OAUTH2_TOKEN_URL', 'token'),
+        help="Endpoint to retrieve token. Defaults to openid-connect's endpoint: `token`.",
+    ).tag(config=True)
+
+    token_url = Unicode(
+        help="Url to retrieve token."
+    )
+
+    @default('token_url')
+    def _default_token_url(self):
+        return self._url_from_endpoint(self.token_endpoint)
+
+    auth_endpoint = Unicode(
+        os.environ.get('OAUTH2_AUTHORIZE_URL', "auth"),
+        help="Authorization endpoint.",
+    ).tag(config=True)
+
+    auth_url = Unicode(
+        help="Url to authenticate users."
+    )
+
+    @default('auth_url')
+    def _default_auth_url(self):
+        return self._url_from_endpoint(self.auth_endpoint)
+
+    userdata_endpoint = Unicode(
+        os.environ.get('OAUTH2_USERDATA_URL', "userinfo"),
+        help="Endpoint to retrieve user data. Defaults to openid-connect's endpoint: `userinfo`.",
+    ).tag(config=True)
+
+    userdata_url = Unicode(
+        help="URL to retrieve user data."
+    )
+
+    @default('userdata_url')
+    def _default_userdata_url(self):
+        return self._url_from_endpoint(self.userdata_endpoint)
+    
+    username_key = Unicode(
+        "preferred_username",
+        help="Userdata username key from returned json for USERDATA_URL",
+    ).tag(config=True)
+
     manages_groups = Bool(True)
 
     group_key = Unicode(
         "groups",
-        help="""
-        The key in auth_state that lists the groups of the user.
-        """
-    )
+        help="The key in auth_state that lists the groups of the user."
+    ).tag(config=True)
+
+    enable_auth_state = Bool(True)
 
     async def _request_auth(self, handler, data=None):
         """Requests an access token for the logged in user from Keycloak's 
         OpenID-connect API.
+
+        Returns: 
+            auth_data : dict
+                Keys are 'access_token', 'refresh_token', and 'scope'.
         """
         code = handler.get_argument("code")
         # TODO: Configure the curl_httpclient for tornado
@@ -133,7 +197,7 @@ class KeycloakAuthenticator(GenericOAuthenticator):
         }
 
     async def _request_userdata(self, access_token):
-        """Requests user info form.
+        """Requests user info form using an access_token.
         """
         http_client = AsyncHTTPClient()
 
@@ -165,9 +229,27 @@ class KeycloakAuthenticator(GenericOAuthenticator):
 
         return user_data
 
-    async def _introspect_auth(self):
+    async def _introspect_token(self):
         """Introspect token to check whether it is active or not.
         """
+        raise Exception("Not implemented.")
+
+    def _diff_usermodel(self, model1, model2):
+        diff = {}
+        if model1["name"] != model2["name"]:
+            diff["name"] = model2["name"]
+        
+        # Diff groups lists if the authenticator manages groups.
+        if self.manage_groups:
+            groups1 = set(model1["groups"])
+            groups2 = set(model2["groups"])
+            if groups1.symmetric_difference(groups2):
+                groups = list(groups1.union(groups2))
+                groups.extend(groups2.difference(groups1))
+                diff['groups'] = groups
+
+        if self.enable_auth_state:
+            pass 
 
 
     async def refresh_user(self, user):
@@ -206,6 +288,8 @@ class KeycloakAuthenticator(GenericOAuthenticator):
             else:
                 raise err
         
+        
+
         # Check group membership.
         if self.manage_groups:
             groups = self.get_groups(user)
@@ -239,22 +323,22 @@ class KeycloakAuthenticator(GenericOAuthenticator):
         return groups
 
     async def authenticate(self, handler, data=None):
-        """Authenticate the user using keycloak's token API."""        
+        """Authenticate the user using keycloak's token API."""      
+        # Get token for user from keycloak.  
         auth_data = await maybe_future(self._request_auth(handler, data=data))
 
         # Get user data
         access_token = auth_data.get('access_token')
         user_data = await maybe_future(self._request_userdata(access_token))
 
-        # Build auth_state
-        auth_state = auth_data
-        auth_state['oauth_user'] = user_data
-
-        # Build user model to be passed to Jupyterhub.
-        user_model = {
-            'name': user_data.get(self.username_key),
-            'auth_state': auth_state
-        }
+        # Build usermodel
+        user_model = {'name': user_data.get(self.username_key)}
+        
+        # If auth state is enabled
+        if self.enable_auth_state:
+            # Build auth_state
+            auth_state = auth_data
+            auth_state['oauth_user'] = user_data
 
         # If the authenticator handles groups, source it from user data.
         if self.manages_groups:
