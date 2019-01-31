@@ -1,1 +1,1 @@
-from .auth import KeycloakAuthenticator
+from .auth import KeycloakAuthenticator, LocalKeycloakAuthenticator
