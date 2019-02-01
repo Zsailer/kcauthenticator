@@ -136,7 +136,7 @@ class KeycloakAuthenticator(GenericOAuthenticator):
         help="Userdata username key from returned json for USERDATA_URL",
     ).tag(config=True)
 
-    manage_groups = Bool(True)
+    manage_groups = Bool(True).tag(config=True)
 
     group_key = Unicode(
         "groups",
@@ -371,6 +371,8 @@ class KeycloakAuthenticator(GenericOAuthenticator):
         # If the authenticator handles groups, source it from user data.
         if self.manage_groups:
             user_model['groups'] = user_data.get(self.group_key)
+
+        print(groups)
 
         return user_model
 
