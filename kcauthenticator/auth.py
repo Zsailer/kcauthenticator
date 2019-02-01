@@ -41,7 +41,7 @@ class KeycloakLoginHandler(GenericLoginHandler, KeycloakEnvMixin):
 class KeycloakAuthenticator(GenericOAuthenticator):
     """Authenticates users using a Keycloak server.
 
-    User model (if `manage_groups==True`)
+    User model (if `manage_groups = True`)
     
     .. code-block: python
 
@@ -372,10 +372,6 @@ class KeycloakAuthenticator(GenericOAuthenticator):
         # If the authenticator handles groups, source it from user data.
         if self.manage_groups:
             user_model['groups'] = user_data.get(self.group_key)
-
-        print('\n\n---------------------\n\n')
-        print(user_model)
-        print('\n\n---------------------\n\n')
 
         return user_model
 
