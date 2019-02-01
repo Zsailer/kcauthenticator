@@ -11,7 +11,11 @@ from tornado.httpclient import HTTPRequest, AsyncHTTPClient, HTTPClientError
 from jupyterhub.auth import LocalAuthenticator
 from jupyterhub.utils import maybe_future
 
-from oauthenticator.generic import GenericEnvMixin, GenericLoginHandler, GenericOAuthenticator
+from oauthenticator.generic import (
+    GenericEnvMixin, 
+    GenericLoginHandler, 
+    GenericOAuthenticator
+)
 
 from traitlets import (
     Unicode,
@@ -19,13 +23,6 @@ from traitlets import (
     default
 )
 
-KEYCLOAK_HOST = "localhost"
-PORT = 8080
-REALM = "master"
-
-
-def keycloak_url_from_endpoint(endpoint):
-    return f"http://{KEYCLOAK_HOST}:{PORT}/auth/realms/{REALM}/protocol/openid-connect/{endpoint}"
 
 class KeycloakEnvMixin(GenericEnvMixin):
 
@@ -46,7 +43,7 @@ class KeycloakAuthenticator(GenericOAuthenticator):
 
     User model (if `manage_groups==True`)
     
-    .. code-block: pythons
+    .. code-block: python
 
         {
             "name": "",
@@ -77,9 +74,9 @@ class KeycloakAuthenticator(GenericOAuthenticator):
     def _url_from_endpoint(self, endpoint):
         """Build a url to keycloak server."""
         return "http://{host}/auth/realms/{realm}/protocol/openid-connect/{endpoint}".format(
-            host=self.host,
+            host=self.hostname,
             realm=self.realm,
-            endpoint=self.endpoint
+            endpoint=endpoint
         )
 
     token_endpoint = Unicode(
@@ -108,6 +105,19 @@ class KeycloakAuthenticator(GenericOAuthenticator):
     def _default_auth_url(self):
         return self._url_from_endpoint(self.auth_endpoint)
 
+    introspect_endpoint = Unicode(
+        "token/introspect",
+        help="introspect endpoint.",
+    ).tag(config=True)
+
+    introspect_url = Unicode(
+        help="Url to introspect access tokens."
+    )
+
+    @default('introspect_url')
+    def _default_introspect_url(self):
+        return self._url_from_endpoint(self.introspect_url)
+
     userdata_endpoint = Unicode(
         os.environ.get('OAUTH2_USERDATA_URL', "userinfo"),
         help="Endpoint to retrieve user data. Defaults to openid-connect's endpoint: `userinfo`.",
@@ -126,7 +136,7 @@ class KeycloakAuthenticator(GenericOAuthenticator):
         help="Userdata username key from returned json for USERDATA_URL",
     ).tag(config=True)
 
-    manages_groups = Bool(True)
+    manage_groups = Bool(True)
 
     group_key = Unicode(
         "groups",
@@ -222,35 +232,31 @@ class KeycloakAuthenticator(GenericOAuthenticator):
         resp = await maybe_future(http_client.fetch(req))
         user_data = json.loads(resp.body.decode('utf8', 'replace'))
 
-        if not user_data.get(self.username_key):
-            self.log.error("OAuth user contains no key %s: %s",
-                           self.username_key, user_data)
-            return
-
         return user_data
 
-    async def _introspect_token(self):
-        """Introspect token to check whether it is active or not.
+    async def _introspect_token(self, access_token):
+        """Introspect a token to check whether it is active or not.
+
+
         """
-        raise Exception("Not implemented.")
+        http_client = AsyncHTTPClient()
 
-    def _diff_usermodel(self, model1, model2):
-        diff = {}
-        if model1["name"] != model2["name"]:
-            diff["name"] = model2["name"]
-        
-        # Diff groups lists if the authenticator manages groups.
-        if self.manage_groups:
-            groups1 = set(model1["groups"])
-            groups2 = set(model2["groups"])
-            if groups1.symmetric_difference(groups2):
-                groups = list(groups1.union(groups2))
-                groups.extend(groups2.difference(groups1))
-                diff['groups'] = groups
+        # Determine who the logged in user is
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "JupyterHub",
+            "Authorization": "Bearer {}".format(access_token)
+        }
 
-        if self.enable_auth_state:
-            pass 
-
+        req = HTTPRequest(
+            self.introspect_url,
+            method="POST",
+            headers=headers,
+            validate_cert=self.tls_verify,
+        )
+        resp = await maybe_future(http_client.fetch(req))
+        resp_json = json.loads(resp.body.decode('utf8', 'replace'))
+        return resp_json
 
     async def refresh_user(self, user):
         """Refresh auth data for a given user
@@ -278,8 +284,12 @@ class KeycloakAuthenticator(GenericOAuthenticator):
         # Request user data.
         try:
             # Get last saved token.
-            access_token = user.get_auth_state()["access_token"]
-            user_data = await maybe_future(self._request_userdata(access_token))
+            auth_state = user.get_auth_state()
+            access_token = auth_state.get("access_token")
+            # introspect token
+            token_state = await maybe_future(self._introspect_token(access_token))
+            if token_state['active'] is False:
+                return False
         except HTTPClientError as err:
             # If move is unauthorized, token is invalid or expired. 
             # Need to re-authenticate the user.
@@ -288,14 +298,27 @@ class KeycloakAuthenticator(GenericOAuthenticator):
             else:
                 raise err
         
+        user_data = await maybe_future(self._request_userdata(access_token))
         
+        # Check for changings in user model.
+        refreshed_model = {}
+        name = user_data.get(self.username_key)
+        if user.name != name:
+            refreshed_model['name'] = name
 
-        # Check group membership.
         if self.manage_groups:
             groups = self.get_groups(user)
+            if user.groups != groups:
+                refreshed_model['groups'] = groups
 
-        
+        if self.enable_auth_state:
+            if auth_state['oauth_user'] != user_data:
+                refreshed_model['auth_state']['oauth_user'] = user_data
 
+        if refreshed_model == {}:
+            return True
+
+        return refreshed_model
 
     async def get_groups(self, user):
         """Requests te 
@@ -331,6 +354,11 @@ class KeycloakAuthenticator(GenericOAuthenticator):
         access_token = auth_data.get('access_token')
         user_data = await maybe_future(self._request_userdata(access_token))
 
+        if not user_data.get(self.username_key):
+            self.log.error("OAuth user contains no key %s: %s",
+                           self.username_key, user_data)
+            return
+
         # Build usermodel
         user_model = {'name': user_data.get(self.username_key)}
         
@@ -341,7 +369,7 @@ class KeycloakAuthenticator(GenericOAuthenticator):
             auth_state['oauth_user'] = user_data
 
         # If the authenticator handles groups, source it from user data.
-        if self.manages_groups:
+        if self.manage_groups:
             user_model['groups'] = user_data.get(self.group_key)
 
         return user_model
