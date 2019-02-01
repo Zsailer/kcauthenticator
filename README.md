@@ -28,7 +28,6 @@ Here's an example configuration using the `LocalKeycloakAuthenticator` to authen
 ```python
 from kcauthenticator import LocalKeycloakAuthenticator
 
-
 c.JupyterHub.authenticator_class = LocalKeycloakAuthenticator
 c.LocalKeycloakAuthenticator.oauth_callback_url = 'http://localhost:8000/hub/oauth_callback'
 c.LocalKeycloakAuthenticator.client_id = "jupyterhub"

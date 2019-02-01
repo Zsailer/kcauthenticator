@@ -143,7 +143,7 @@ class KeycloakAuthenticator(GenericOAuthenticator):
         help="The key in auth_state that lists the groups of the user."
     ).tag(config=True)
 
-    enable_auth_state = Bool(True)
+    enable_auth_state = Bool(True).tag(config=True)
 
     async def _request_auth(self, handler, data=None):
         """Requests an access token for the logged in user from Keycloak's 
@@ -367,12 +367,15 @@ class KeycloakAuthenticator(GenericOAuthenticator):
             # Build auth_state
             auth_state = auth_data
             auth_state['oauth_user'] = user_data
+            user_model['auth_state'] = auth_state
 
         # If the authenticator handles groups, source it from user data.
         if self.manage_groups:
             user_model['groups'] = user_data.get(self.group_key)
 
-        print(groups)
+        print('\n\n---------------------\n\n')
+        print(user_model)
+        print('\n\n---------------------\n\n')
 
         return user_model
 
